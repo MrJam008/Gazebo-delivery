@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 import rospy
 from clover import srv
@@ -262,4 +261,5 @@ if __name__ == '__main__':
             set_leds(effect='fill', r=0, g=0, b=0)
         except:
             pass
+
         rospy.loginfo("Delivery mission terminated")
