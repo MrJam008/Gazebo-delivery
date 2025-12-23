@@ -263,3 +263,163 @@ if __name__ == '__main__':
             pass
 
         rospy.loginfo("Delivery mission terminated")
+
+/////
+#!/usr/bin/env python3
+import rospy
+from geometry_msgs.msg import PoseStamped, Twist
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+
+class SimpleDrone:
+    def __init__(self):
+        rospy.init_node('simple_drone_node')
+        
+        # Параметры полета
+        self.target_coordinates = [
+            [1.0, 0.0, 2.0],   # x, y, z
+            [2.0, 1.0, 2.0],
+            [1.0, 2.0, 2.0],
+            [0.0, 1.0, 2.0]
+        ]
+        self.current_target = 0
+        self.reached_target = False
+        self.threshold = 0.2  # метров для достижения цели
+        
+        # Для работы с изображением
+        self.bridge = CvBridge()
+        self.cv_image = None
+        
+        # Параметры распознавания цвета
+        self.color_ranges = {
+            'red': ([0, 100, 100], [10, 255, 255]),
+            'green': ([40, 100, 100], [80, 255, 255]),
+            'blue': ([100, 100, 100], [140, 255, 255])
+        }
+        
+        # ArUco словарь
+        self.aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+        self.aruco_params = aruco.DetectorParameters()
+        
+        # Издатели и подписчики
+        self.pose_pub = rospy.Publisher('/drone/command/pose', PoseStamped, queue_size=10)
+        self.vel_pub = rospy.Publisher('/drone/command/velocity', Twist, queue_size=10)
+        self.image_sub = rospy.Subscriber('/drone/camera/image_raw', Image, self.image_callback)
+        
+        # Текущая позиция (упрощенно)
+        self.current_pose = [0.0, 0.0, 0.0]
+        
+        rospy.loginfo("Дрон инициализирован")
+    
+    def image_callback(self, msg):
+        """Обработка изображения с камеры"""
+        try:
+            self.cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            self.process_image()
+        except Exception as e:
+            rospy.logerr(f"Ошибка обработки изображения: {e}")
+    
+    def process_image(self):
+        """Распознавание ArUco маркеров и цветов"""
+        if self.cv_image is None:
+            return
+        
+        # Распознавание ArUco маркеров
+        gray = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2GRAY)
+        corners, ids, rejected = aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+        
+        if ids is not None:
+            aruco.drawDetectedMarkers(self.cv_image, corners, ids)
+            rospy.loginfo(f"Найден ArUco маркер: {ids.flatten()}")
+            print(f"ArUco ID: {ids.flatten()}")
+        
+        # Распознавание цвета
+        hsv = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2HSV)
+        
+        for color_name, (lower, upper) in self.color_ranges.items():
+            lower = np.array(lower, dtype=np.uint8)
+            upper = np.array(upper, dtype=np.uint8)
+            
+            mask = cv2.inRange(hsv, lower, upper)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                area = max(cv2.contourArea(cnt) for cnt in contours)
+                if area > 100:  # минимальная площадь
+                    rospy.loginfo(f"Найден цвет: {color_name}")
+                    print(f"Цвет: {color_name}")
+    
+    def fly_to_target(self, target):
+        """Полёт к указанной цели"""
+        pose = PoseStamped()
+        pose.header.stamp = rospy.Time.now()
+        pose.header.frame_id = "world"
+        
+        pose.pose.position.x = target[0]
+        pose.pose.position.y = target[1]
+        pose.pose.position.z = target[2]
+        pose.pose.orientation.w = 1.0
+        
+        self.pose_pub.publish(pose)
+        
+        # Упрощённая проверка достижения цели
+        distance = np.sqrt(
+            (target[0] - self.current_pose[0])**2 +
+            (target[1] - self.current_pose[1])**2 +
+            (target[2] - self.current_pose[2])**2
+        )
+        
+        if distance < self.threshold:
+            return True
+        return False
+    
+    def hover(self):
+        """Зависание на месте"""
+        twist = Twist()
+        self.vel_pub.publish(twist)
+    
+    def run(self):
+        """Основной цикл"""
+        rate = rospy.Rate(10)  # 10 Гц
+        
+        rospy.loginfo("Начинаем полёт...")
+        
+        while not rospy.is_shutdown() and self.current_target < len(self.target_coordinates):
+            target = self.target_coordinates[self.current_target]
+            rospy.loginfo(f"Летим к цели {self.current_target + 1}: {target}")
+            
+            # Летим к цели
+            for _ in range(50):  # даём время на полёт
+                if self.fly_to_target(target):
+                    rospy.loginfo(f"Цель {self.current_target + 1} достигнута!")
+                    
+                    # Останавливаемся и смотрим
+                    self.hover()
+                    rospy.sleep(3)  # ждём 3 секунды для распознавания
+                    
+                    self.current_target += 1
+                    break
+                
+                rate.sleep()
+            else:
+                rospy.loginfo("Не удалось достичь цели, пробуем следующую")
+                self.current_target += 1
+            
+            rate.sleep()
+        
+        # Посадка
+        rospy.loginfo("Задание выполнено, посадка...")
+        self.fly_to_target([0.0, 0.0, 0.0])
+        rospy.sleep(2)
+        rospy.loginfo("Программа завершена")
+
+if __name__ == '__main__':
+    try:
+        drone = SimpleDrone()
+        rospy.sleep(1)  # ждём инициализации
+        drone.run()
+    except rospy.ROSInterruptException:
+        pass
