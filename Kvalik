@@ -1,0 +1,186 @@
+from clover import srv
+from std_srvs.srv import Trigger
+from clover.srv import SetLEDEffect
+import rospy
+import math
+import cv2
+import cv_bridge
+import numpy as np
+import pyzbar.pyzbar as pyzbar
+from sensor_msgs.msg import Image
+
+rospy.init_node('flight')
+
+get_telemetry = rospy.ServiceProxy('get_telemetry', srv.GetTelemetry)
+navigate = rospy.ServiceProxy('navigate', srv.Navigate)
+land = rospy.ServiceProxy('land', Trigger)
+set_led = rospy.ServiceProxy('led/set_effect', SetLEDEffect)
+
+bridge = cv_bridge.CvBridge()
+
+COLOR_RANGES = {
+    'red': [
+        {'lower': np.array([0, 120, 70]), 'upper': np.array([10, 255, 255])},
+        {'lower': np.array([170, 120, 70]), 'upper': np.array([180, 255, 255])}
+    ],
+    'green': {'lower': np.array([40, 40, 40]), 'upper': np.array([80, 255, 255])},
+    'blue': {'lower': np.array([100, 150, 0]), 'upper': np.array([140, 255, 255])}
+}
+
+LED_COLORS = {
+    'red': {'r': 255, 'g': 0, 'b': 0},
+    'green': {'r': 0, 'g': 255, 'b': 0},
+    'blue': {'r': 0, 'g': 0, 'b': 255},
+    'white': {'r': 255, 'g': 255, 'b': 255},
+    'yellow': {'r': 255, 'g': 255, 'b': 0},
+    'off': {'r': 0, 'g': 0, 'b': 0}
+}
+
+MIN_AREA = 500
+detected_objects = {'red': False, 'green': False, 'blue': False}
+last_led_change = rospy.Time.now()
+current_led_color = 'white'
+qr_blink_active = False
+qr_blink_end_time = None
+
+def set_led_color(color_name, blink=False, blink_rate=2.0):
+    global current_led_color
+    
+    if color_name not in LED_COLORS:
+        rospy.logwarn(f"Неизвестный цвет LED: {color_name}")
+        return
+    
+    color = LED_COLORS[color_name]
+    
+    try:
+        if blink:
+            effect = 'blink'
+            set_led(effect=effect, r=color['r'], g=color['g'], b=color['b'], 
+                   brightness=255, rate=blink_rate)
+            rospy.loginfo(f"LED: мигающий {color_name}")
+        else:
+            effect = 'fill'
+            set_led(effect=effect, r=color['r'], g=color['g'], b=color['b'])
+            rospy.loginfo(f"LED: установлен цвет {color_name}")
+        
+        current_led_color = color_name
+        
+    except rospy.ServiceException as e:
+        rospy.logerr(f"Не удалось установить LED: {e}")
+
+def image_callback(msg):
+    global qr_blink_active, qr_blink_end_time, last_led_change
+    
+    try:
+        cv_image = bridge.imgmsg_to_cv2(msg, 'bgr8')
+        
+        qr_detected = detect_qr_codes(cv_image)
+        color_detected = detect_color_platforms(cv_image)
+        
+        current_time = rospy.Time.now()
+        
+        if qr_detected and not qr_blink_active:
+            qr_blink_active = True
+            qr_blink_end_time = current_time + rospy.Duration(3.0)
+            set_led_color('yellow', blink=True, blink_rate=5.0)
+            last_led_change = current_time
+        
+        if qr_blink_active and current_time > qr_blink_end_time:
+            qr_blink_active = False
+            if color_detected:
+                set_led_color(color_detected)
+            else:
+                set_led_color('white')
+            last_led_change = current_time
+        
+        if color_detected and not qr_blink_active:
+            if color_detected != current_led_color or (current_time - last_led_change).to_sec() > 1.0:
+                set_led_color(color_detected)
+                last_led_change = current_time
+        
+    except Exception as e:
+        rospy.logerr(f"Error processing image: {e}")
+
+def detect_qr_codes(cv_image):
+    qr_detected = False
+    
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    decoded_objects = pyzbar.decode(gray)
+    
+    for obj in decoded_objects:
+        qr_data = obj.data.decode('utf-8')
+        qr_type = obj.type
+        
+        rospy.loginfo(f"Обнаружен QR-код ({qr_type}): {qr_data}")
+        qr_detected = True
+        
+        points = obj.polygon
+        if len(points) > 4:
+            hull = cv2.convexHull(np.array([point for point in points], dtype=np.float32))
+            points = hull
+        if len(points) == 4:
+            pts = np.array(points, dtype=np.int32)
+            cv2.polylines(cv_image, [pts], True, (0, 255, 255), 2)
+        
+        cv2.putText(cv_image, f"QR: {qr_data}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    return qr_detected
+
+def detect_color_platforms(cv_image):
+    detected_color = None
+    
+    hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+    
+    for color_name, color_range in COLOR_RANGES.items():
+        if color_name == 'red':
+            mask1 = cv2.inRange(hsv, color_range[0]['lower'], color_range[0]['upper'])
+            mask2 = cv2.inRange(hsv, color_range[1]['lower'], color_range[1]['upper'])
+            mask = mask1 + mask2
+        else:
+            mask = cv2.inRange(hsv, color_range['lower'], color_range['upper'])
+        
+        mask = cv2.erode(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
+        
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            
+            if area > MIN_AREA:
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                color_display = {'red': (0, 0, 255), 'green': (0, 255, 0), 'blue': (255, 0, 0)}
+                cv2.rectangle(cv_image, (x, y), (x + w, y + h), color_display[color_name], 2)
+                
+                cv2.putText(cv_image, f"{color_name.upper()}", 
+                           (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_display[color_name], 2)
+                
+                if not detected_objects[color_name]:
+                    rospy.loginfo(f"Обнаружена {color_name} платформа! Площадь: {area:.2f} пикселей")
+                    detected_objects[color_name] = True
+                
+                detected_color = color_name
+                
+                center_x = x + w // 2
+                center_y = y + h // 2
+    
+    return detected_color
+
+def navigate_wait(x=0, y=0, z=0, speed=0.5, frame_id='body', auto_arm=False):
+    res = navigate(x=x, y=y, z=z, yaw=float('nan'), speed=speed, frame_id=frame_id, auto_arm=auto_arm)
+
+    if not res.success:
+        raise Exception(res.message)
+
+    while not rospy.is_shutdown():
+        telem = get_telemetry(frame_id='navigate_target')
+        if math.sqrt(telem.x  2 + telem.y  2 + telem.z ** 2) < 0.2:
+            return
+        rospy.sleep(0.2)
+
+def land_wait():
+    land()
+    while get_telemetry().armed:
+        rospy.sleep(0.2)
