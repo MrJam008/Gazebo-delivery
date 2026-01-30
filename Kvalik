@@ -1,3 +1,4 @@
+> 🌪️:
 from clover import srv
 from std_srvs.srv import Trigger
 from clover.srv import SetLEDEffect
@@ -184,3 +185,70 @@ def land_wait():
     land()
     while get_telemetry().armed:
         rospy.sleep(0.2)
+if name == 'main':
+    try:
+        image_sub = rospy.Subscriber('main_camera/image_raw', Image, image_callback, queue_size=1)
+        
+        rospy.sleep(1)
+        
+        set_led_color('white')
+        
+        rospy.loginfo("Начинаем полет...")
+        
+        # Взлет
+        navigate_wait(z=1, frame_id='body', auto_arm=True)
+        rospy.loginfo("Взлетели на высоту 1 метр")
+        rospy.sleep(3)  # Остановка на 3 секунды после взлета
+        
+        # Точка (9, 9)
+        rospy.loginfo("Летим к точке (9, 9)...")
+        navigate_wait(x=9, y=9, z=1, frame_id='aruco_map', speed=1)
+        rospy.loginfo("Прибыли в точку (9, 9). Ожидание 3 секунды...")
+        rospy.sleep(3)  # Остановка на 3 секунды
+        
+        # Точка (9, 0)
+        rospy.loginfo("Летим к точке (9, 0)...")
+        navigate_wait(x=9, y=0, z=1, frame_id='aruco_map', speed=1)
+        rospy.loginfo("Прибыли в точку (9, 0). Ожидание 3 секунды...")
+        rospy.sleep(3)  # Остановка на 3 секунды
+        
+        # Точка (0, 0)
+        rospy.loginfo("Летим к точке (0, 0)...")
+        navigate_wait(x=0, y=0, z=1, frame_id='aruco_map', speed=1)
+        rospy.loginfo("Прибыли в точку (0, 0). Ожидание 3 секунды...")
+        rospy.sleep(3)  # Остановка на 3 секунды
+        
+        # Точка (0, 9)
+        rospy.loginfo("Летим к точке (0, 9)...")
+        navigate_wait(x=0, y=9, z=1, frame_id='aruco_map', speed=1)
+        rospy.loginfo("Прибыли в точку (0, 9). Ожидание 3 секунды...")
+        rospy.sleep(3)  # Остановка на 3 секунды
+        
+        # Мигание красным светом
+        set_led_color('red', blink=True, blink_rate=3.0)
+        rospy.sleep(2)
+        
+        # Посадка
+        rospy.loginfo("Начинаем посадку...")
+        land_wait()
+        
+        set_led_color('off')
+        
+        # Итоговый отчет
+        rospy.loginfo("=== ИТОГОВЫЙ ОТЧЕТ ===")
+        for color, detected in detected_objects.items():
+            status = "обнаружена" if detected else "не обнаружена"
+            rospy.loginfo(f"{color.capitalize()} платформа: {status}")
+        
+    except rospy.ServiceException as e:
+        rospy.logerr(f"Ошибка сервиса ROS: {e}")
+    except Exception as e:
+        rospy.logerr(f"Ошибка во время полета: {e}")
+    finally:
+        if 'image_sub' in locals():
+            image_sub.unregister()
+        try:
+            set_led_color('off')
+        except:
+            pass
+        land_wait()
